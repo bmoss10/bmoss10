@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ultimate Apple Arrow Challenge</title>
+  <style>
+    body {
+      margin: 0;
+      background-color: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      flex-direction: column;
+    }
+    #game-container {
+      text-align: center;
+      color: #fff;
+    }
+    canvas {
+      border: 2px solid #333;
+      background-color: #fff;
+      display: block;
+      margin: 20px auto;
+      box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
+    }
+    h1 {
+      font-family: sans-serif;
+      color: #fff;
+    }
+    #restartButton {
+      font-family: sans-serif;
+      font-size: 18px;
+      padding: 10px 20px;
+      cursor: pointer;
+      margin-top: 10px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <a href="Scratch.html" style="color: white; font-family: sans-serif; margin: 10px;">← Back to Scratch Page</a>
+  <div id="game-container">
+    <h1>Ultimate Apple Arrow Challenge</h1>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <button id="restartButton">Restart Game</button>
+  </div>
+
+  <script>
+    // === CANVAS & CONTEXT ===
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+
+    // === SOUND SETUP ===
+    // Ensure these sound files are available (or update paths accordingly).
+    const drawSound    = new Audio('draw.mp3');
+    const releaseSound = new Audio('release.mp3');
+    const hitSound     = new Audio('hit.mp3');
+    const grazeSound   = new Audio('graze.mp3');
+    const bgm          = new Audio('bgm.mp3');
+    const windSound    = new Audio('wind.mp3');
+    const cheerSound   = new Audio('cheer.mp3');
+    bgm.loop = true;
+
+    // === GLOBAL GAME VARIABLES ===
+    let gameRunning = false;    // true when active
+    let gameOver    = false;
+    let gameWin     = false;
+    let round       = 1;
+    let misses      = 0;
+    const maxMisses = 3;
+
+    // === PHYSICS & WIND ===
+    const baseArrowSpeed = 12;
+    const baseGravity = 0.5;
+    let currentWind = 0;  // gets set for each shot
+
+    // === AIMING VARIABLES ===
+    let isAiming = false;
+    // aimPosition holds the current pointer position (updated on mousemove)
+    let aimPosition = { x: 0, y: 0 };
+
+    // === PREDICTED TRAJECTORY ===
+    let predictedTrajectory = [];
+    function computeTrajectory(initialState) {
+      let simX = initialState.x;
+      let simY = initialState.y;
+      let simVx = initialState.vx;
+      let simVy = initialState.vy;
+      const effectiveGravity = baseGravity + round * 0.05;
+      let points = [];
+      for (let i = 0; i < 120; i++) {
+        points.push({ x: simX, y: simY });
+        simVx += currentWind;
+        simVy += effectiveGravity;
+        simX += simVx;
+        simY += simVy;
+        if (simX < 0 || simX > canvas.width || simY < 0 || simY > canvas.height) break;
+      }
+      return points;
+    }
+
+    // === PARTICLE SYSTEMS ===
+    // Spark particles for apple hits.
+    let particles = [];
+    function addSparkParticles(x, y) {
+      for (let i = 0; i < 15; i++) {
+        particles.push({
+          x: x,
+          y: y,
+          vx: (Math.random()-0.5)*4,
+          vy: (Math.random()-0.5)*4,
+          life: 60,
+          maxLife: 60
+        });
+      }
+    }
+    function updateParticles() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life--;
+        if(p.life <= 0) particles.splice(i, 1);
+      }
+    }
+    function drawParticles() {
+      for(let p of particles) {
+        let opacity = p.life / p.maxLife;
+        ctx.fillStyle = "rgba(255, 165, 0, "+ opacity +")";
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, 2*Math.PI);
+        ctx.fill();
+      }
+    }
+
+    // Smoke particles for the arrow trail.
+    let smokeParticles = [];
+    function addSmokeParticle(x, y) {
+      smokeParticles.push({
+        x: x,
+        y: y,
+        vx: (Math.random()-0.5)*1,
+        vy: (Math.random()-0.5)*1,
+        life: 80,
+        maxLife: 80,
+        size: 5 + Math.random()*3
+      });
+    }
+    function updateSmokeParticles() {
+      for(let i = smokeParticles.length - 1; i >= 0; i--) {
+        let sp = smokeParticles[i];
+        sp.x += sp.vx;
+        sp.y += sp.vy;
+        sp.life--;
+        if(sp.life <= 0) smokeParticles.splice(i, 1);
+      }
+    }
+    function drawSmokeParticles() {
+      for(let sp of smokeParticles) {
+        let opacity = sp.life / sp.maxLife;
+        ctx.fillStyle = "rgba(128,128,128,"+ opacity +")";
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, sp.size, 0, 2*Math.PI);
+        ctx.fill();
+      }
+    }
+
+    // === SHOOTER (Stick-Figure Archer with Bow and Quiver) ===
+    const shooter = {
+      x: 100,
+      y: 450,
+      phase: "idle",  // "idle", "drawing", "shooting", "followThrough"
+      animProgress: 0,
+      animStart: 0,
+      drawingDuration: 150,
+      shootingDuration: 150,
+      followThroughDuration: 150,
+      expression: "smile"   // "smile" or "frown"
+    };
+
+    // The shooter’s hand positions (these are relative to the shooter).
+    function getHandPositions() {
+      return {
+        idle: { x: shooter.x + 20, y: shooter.y - 20 },
+        drawing: { x: shooter.x - 10, y: shooter.y - 30 },
+        shooting: { x: shooter.x + 30, y: shooter.y - 20 }
+      };
+    }
+
+    // Draw a quiver behind the shooter.
+    function drawQuiver() {
+      ctx.save();
+      // Position the quiver slightly to the left.
+      let qx = shooter.x - 40;
+      let qy = shooter.y - 40;
+      ctx.fillStyle = "#654321";
+      ctx.fillRect(qx, qy, 10, 50);
+      // Draw a stack of 5 arrows on the quiver.
+      ctx.strokeStyle = "black";
+      for (let i = 0; i < 5; i++) {
+        let arrowY = qy + 5 + i * (40/4);
+        ctx.beginPath();
+        ctx.moveTo(qx + 10, arrowY);
+        ctx.lineTo(qx - 5, arrowY);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // === ARROW OBJECT ===
+    const arrow = {
+      active: false,
+      x: 0,
+      y: 0,
+      vx: 0,
+      vy: 0,
+      angle: 0,
+      initialState: { x: 0, y: 0, vx: 0, vy: 0 }
+    };
+
+    // === TARGET & APPLES ===
+    // The target is fixed at a closer position.
+    const target = {
+      x: 500,
+      y: 450,
+      headRadius: 30,
+      expression: "neutral"  // "neutral", "smile", or "frown"
+    };
+    let apples = [];
+    const appleRadius = 8;
+    function initRound() {
+      apples = [];
+      const spacing = appleRadius*2 + 4;
+      for(let i = 0; i < round; i++){
+        apples.push({
+          offsetY: (i+1)*spacing,
+          hit: false,
+          grazed: false
+        });
+      }
+    }
+
+    // === BACKGROUND (Mountains, Sun) ===
+    function drawBackground() {
+      // Draw sky/ground gradient.
+      const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      gradient.addColorStop(0, "#87CEEB");
+      gradient.addColorStop(1, "#98FB98");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Draw two simple mountains.
+      ctx.fillStyle = "#a9a9a9";
+      ctx.beginPath();
+      ctx.moveTo(100, canvas.height*0.6);
+      ctx.lineTo(250, canvas.height*0.3);
+      ctx.lineTo(400, canvas.height*0.6);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#c0c0c0";
+      ctx.beginPath();
+      ctx.moveTo(300, canvas.height*0.6);
+      ctx.lineTo(450, canvas.height*0.35);
+      ctx.lineTo(600, canvas.height*0.6);
+      ctx.closePath();
+      ctx.fill();
+
+      // Snow caps.
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.moveTo(230, canvas.height*0.3);
+      ctx.lineTo(250, canvas.height*0.35);
+      ctx.lineTo(270, canvas.height*0.3);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(430, canvas.height*0.35);
+      ctx.lineTo(450, canvas.height*0.38);
+      ctx.lineTo(470, canvas.height*0.35);
+      ctx.closePath();
+      ctx.fill();
+
+      // Draw the sun in the top right corner.
+      ctx.fillStyle = "#FFD700";
+      ctx.beginPath();
+      ctx.arc(canvas.width - 50, 50, 30, 0, 2*Math.PI);
+      ctx.fill();
+    }
+
+    // === DRAW TARGET & FACE ===
+    function drawTarget() {
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 2;
+      // Draw head.
+      ctx.beginPath();
+      ctx.arc(target.x, target.y, target.headRadius, 0, 2*Math.PI);
+      ctx.stroke();
+      // Draw face on target.
+      // Draw eyes.
+      ctx.fillStyle = "black";
+      ctx.beginPath();
+      ctx.arc(target.x - 5, target.y - 5, 2, 0, 2*Math.PI);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(target.x + 5, target.y - 5, 2, 0, 2*Math.PI);
+      ctx.fill();
+      // Draw mouth depending on target.expression.
+      ctx.beginPath();
+      if(target.expression === "neutral") {
+        ctx.moveTo(target.x - 4, target.y + 4);
+        ctx.lineTo(target.x + 4, target.y + 4);
+      } else if(target.expression === "smile") {
+        ctx.arc(target.x, target.y + 2, 4, 0, Math.PI, false);
+      } else if(target.expression === "frown") {
+        ctx.arc(target.x, target.y + 8, 4, Math.PI, 0, false);
+      }
+      ctx.stroke();
+
+      // Draw body.
+      ctx.beginPath();
+      ctx.moveTo(target.x, target.y + target.headRadius);
+      ctx.lineTo(target.x, target.y + target.headRadius + 50);
+      ctx.stroke();
+      // Draw arms.
+      ctx.beginPath();
+      ctx.moveTo(target.x, target.y + target.headRadius + 10);
+      ctx.lineTo(target.x - 20, target.y + target.headRadius + 30);
+      ctx.moveTo(target.x, target.y + target.headRadius + 10);
+      ctx.lineTo(target.x + 20, target.y + target.headRadius + 30);
+      ctx.stroke();
+      // Draw apples on target's head.
+      for(let apple of apples){
+        if(!apple.hit){
+          ctx.fillStyle = "red";
+          let ax = target.x;
+          let ay = target.y - target.headRadius - apple.offsetY;
+          ctx.beginPath();
+          ctx.arc(ax, ay, appleRadius, 0, 2*Math.PI);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+    }
+
+    // === DRAW SHOOTER (with Bow, Face & Quiver) ===
+    function drawShooter() {
+      // Draw quiver behind shooter.
+      drawQuiver();
+
+      // Draw head.
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(shooter.x, shooter.y - 40, 10, 0, 2*Math.PI);
+      ctx.stroke();
+      
+      // Draw shooter face.
+      ctx.fillStyle = "black";
+      // Eyes.
+      ctx.beginPath();
+      ctx.arc(shooter.x - 3, shooter.y - 43, 1.5, 0, 2*Math.PI);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(shooter.x + 3, shooter.y - 43, 1.5, 0, 2*Math.PI);
+      ctx.fill();
+      // Mouth (use shooter.expression, either "smile" or "frown").
+      ctx.beginPath();
+      if(shooter.expression === "smile") {
+        ctx.arc(shooter.x, shooter.y - 38, 4, 0, Math.PI, false);
+      } else if(shooter.expression === "frown") {
+        ctx.arc(shooter.x, shooter.y - 36, 4, Math.PI, 0, false);
+      }
+      ctx.stroke();
+      
+      // Draw body.
+      ctx.beginPath();
+      ctx.moveTo(shooter.x, shooter.y - 30);
+      ctx.lineTo(shooter.x, shooter.y);
+      ctx.stroke();
+      // Draw legs.
+      ctx.beginPath();
+      ctx.moveTo(shooter.x, shooter.y);
+      ctx.lineTo(shooter.x - 10, shooter.y + 20);
+      ctx.moveTo(shooter.x, shooter.y);
+      ctx.lineTo(shooter.x + 10, shooter.y + 20);
+      ctx.stroke();
+
+      // Draw the bow.
+      // Now the bow is drawn to face to the right.
+      ctx.strokeStyle = "brown";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      // Draw an arc with center to the right of the shooter.
+      ctx.arc(shooter.x + 15, shooter.y - 20, 25, Math.PI * 1.5, Math.PI * 0.5, true);
+      ctx.stroke();
+
+      // Compute hand position.
+      let handPositions = getHandPositions();
+      let currentHand;
+      if(shooter.phase === "idle") {
+        currentHand = handPositions.idle;
+      } else if(shooter.phase === "drawing") {
+        currentHand = {
+          x: handPositions.idle.x + (handPositions.drawing.x - handPositions.idle.x) * shooter.animProgress,
+          y: handPositions.idle.y + (handPositions.drawing.y - handPositions.idle.y) * shooter.animProgress
+        };
+      } else if(shooter.phase === "shooting") {
+        currentHand = {
+          x: handPositions.drawing.x + (handPositions.shooting.x - handPositions.drawing.x) * shooter.animProgress,
+          y: handPositions.drawing.y + (handPositions.shooting.y - handPositions.drawing.y) * shooter.animProgress
+        };
+      } else if(shooter.phase === "followThrough") {
+        currentHand = {
+          x: handPositions.shooting.x + (handPositions.idle.x - handPositions.shooting.x) * shooter.animProgress,
+          y: handPositions.shooting.y + (handPositions.idle.y - handPositions.shooting.y) * shooter.animProgress
+        };
+      }
+      // Draw the arm.
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(shooter.x, shooter.y - 20);
+      ctx.lineTo(currentHand.x, currentHand.y);
+      ctx.stroke();
+
+      // If in drawing phase and not overridden by aiming, draw arrow at hand.
+      if(shooter.phase === "drawing" && !isAiming) {
+        ctx.strokeStyle = "brown";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(currentHand.x, currentHand.y);
+        ctx.lineTo(currentHand.x + 20, currentHand.y);
+        ctx.stroke();
+      }
+    }
+
+    // === DRAW ARROW ===
+    function drawArrow() {
+      if(!arrow.active) return;
+      ctx.save();
+      ctx.translate(arrow.x, arrow.y);
+      ctx.rotate(arrow.angle);
+      ctx.strokeStyle = "brown";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(-10, 0);
+      ctx.lineTo(10, 0);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(10, 0);
+      ctx.lineTo(5, -3);
+      ctx.lineTo(5, 3);
+      ctx.closePath();
+      ctx.fillStyle = "brown";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // === DRAW AIM GUIDE & PREDICTED TRAJECTORY ===
+    function drawAimGuide() {
+      let bowPos = getHandPositions().idle;
+      ctx.save();
+      ctx.setLineDash([5, 5]);
+      ctx.strokeStyle = "purple";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(bowPos.x, bowPos.y);
+      ctx.lineTo(aimPosition.x, aimPosition.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+    function drawPredictedTrajectory() {
+      if(isAiming && predictedTrajectory.length > 1) {
+        ctx.save();
+        ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = "rgba(0, 0, 255, 0.5)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for(let i = 0; i < predictedTrajectory.length; i++){
+          let pt = predictedTrajectory[i];
+          if(i === 0) ctx.moveTo(pt.x, pt.y);
+          else ctx.lineTo(pt.x, pt.y);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // === DRAW HUD ===
+    function drawHUD() {
+      ctx.font = "20px Arial";
+      ctx.fillStyle = "black";
+      ctx.fillText("Round: " + round, 10, 30);
+      ctx.fillText("Misses: " + misses, 10, 60);
+      ctx.fillText("Wind: " + currentWind.toFixed(2), 10, 90);
+    }
+
+    // === UPDATE SHOOTER ANIMATION ===
+    function updateShooterAnimation(currentTime) {
+      if(shooter.phase !== "idle" && !isAiming) {
+        let duration = 0;
+        if(shooter.phase === "drawing") duration = shooter.drawingDuration;
+        else if(shooter.phase === "shooting") duration = shooter.shootingDuration;
+        else if(shooter.phase === "followThrough") duration = shooter.followThroughDuration;
+        let elapsed = currentTime - shooter.animStart;
+        shooter.animProgress = Math.min(elapsed/duration,1);
+        if(shooter.animProgress >= 1){
+          if(shooter.phase === "drawing"){
+            shooter.phase = "shooting";
+            shooter.animProgress = 0;
+            shooter.animStart = currentTime;
+            releaseSound.play();
+          } else if(shooter.phase === "shooting"){
+            shooter.phase = "followThrough";
+            shooter.animProgress = 0;
+            shooter.animStart = currentTime;
+          } else if(shooter.phase === "followThrough"){
+            shooter.phase = "idle";
+            shooter.animProgress = 0;
+          }
+        }
+      }
+    }
+
+    // === UPDATE ARROW PHYSICS & COLLISION ===
+    function updateArrow() {
+      if(!arrow.active) return;
+      const effectiveGravity = baseGravity + round * 0.05;
+      arrow.vy += effectiveGravity;
+      arrow.vx += currentWind;
+      arrow.x += arrow.vx;
+      arrow.y += arrow.vy;
+      arrow.angle = Math.atan2(arrow.vy, arrow.vx);
+      addSmokeParticle(arrow.x, arrow.y);
+
+      // Check collision with apples.
+      for(let apple of apples) {
+        if(!apple.hit){
+          let ax = target.x;
+          let ay = target.y - target.headRadius - apple.offsetY;
+          let dx = arrow.x - ax;
+          let dy = arrow.y - ay;
+          let dist = Math.sqrt(dx*dx + dy*dy);
+          if(dist < appleRadius) {
+            apple.hit = true;
+            arrow.active = false;
+            // When an apple is hit, set both shooter and target to frown.
+            shooter.expression = "frown";
+            target.expression = "frown";
+            addSparkParticles(ax, ay);
+            hitSound.play();
+            if(apples.every(a => a.hit)){
+              if(round === 10){
+                gameWin = true;
+                gameRunning = false;
+                cheerSound.play();
+                showRestartButton();
+              } else {
+                cheerSound.play();
+                round++;
+                initRound();
+              }
+            }
+            return;
+          } else if(!apple.grazed && dist < appleRadius+5) {
+            grazeSound.play();
+            apple.grazed = true;
+          }
+        }
+      }
+
+      // Check collision with target's head.
+      let dx = arrow.x - target.x;
+      let dy = arrow.y - target.y;
+      let dist = Math.sqrt(dx*dx+dy*dy);
+      if(dist < target.headRadius){
+        arrow.active = false;
+        gameOver = true;
+        gameRunning = false;
+        target.expression = "frown";
+        showRestartButton();
+        return;
+      }
+
+      // Off-screen: count as miss and set target (and shooter) to smile.
+      if(arrow.x < 0 || arrow.x > canvas.width || arrow.y < 0 || arrow.y > canvas.height){
+        arrow.active = false;
+        shooter.expression = "smile";
+        target.expression = "smile";
+        misses++;
+        if(misses > maxMisses){
+          gameOver = true;
+          gameRunning = false;
+          showRestartButton();
+        }
+      }
+    }
+
+    // === MAIN GAME LOOP ===
+    let lastTime = performance.now();
+    function gameLoop(currentTime) {
+      lastTime = currentTime;
+      drawBackground();
+      updateShooterAnimation(currentTime);
+      updateParticles();
+      updateSmokeParticles();
+      if(arrow.active) updateArrow();
+
+      drawTarget();
+      drawShooter();
+      drawArrow();
+      if(isAiming) {
+        drawAimGuide();
+        drawPredictedTrajectory();
+      }
+      drawSmokeParticles();
+      drawParticles();
+      drawHUD();
+
+      if(!gameRunning){
+        ctx.font = "50px Arial";
+        ctx.fillStyle = "red";
+        const msg = gameWin ? "You Win!" : "Game Over";
+        ctx.fillText(msg, canvas.width/2 - 150, canvas.height/2);
+      } else {
+        requestAnimationFrame(gameLoop);
+      }
+    }
+
+    // === RESTART & RESET ===
+    function showRestartButton() {
+      document.getElementById("restartButton").style.display = "inline-block";
+    }
+    function resetGame() {
+      gameRunning = true;
+      gameOver = false;
+      gameWin = false;
+      round = 1;
+      misses = 0;
+      arrow.active = false;
+      shooter.phase = "idle";
+      shooter.animProgress = 0;
+      shooter.expression = "smile";
+      target.expression = "neutral";
+      particles = [];
+      smokeParticles = [];
+      initRound();
+      currentWind = 0;
+      predictedTrajectory = [];
+      document.getElementById("restartButton").style.display = "none";
+      lastTime = performance.now();
+      requestAnimationFrame(gameLoop);
+    }
+
+    // === HANDLE MOUSE EVENTS FOR AIMING & SHOOTING ===
+    canvas.addEventListener("mousedown", function(event) {
+      if(!gameRunning || arrow.active) return;
+      isAiming = true;
+      shooter.phase = "drawing";
+      shooter.animProgress = 0;
+      shooter.animStart = performance.now();
+      const rect = canvas.getBoundingClientRect();
+      aimPosition = {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
+      };
+    });
+    canvas.addEventListener("mousemove", function(event) {
+      const rect = canvas.getBoundingClientRect();
+      aimPosition = {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
+      };
+      if(isAiming) {
+        const bowPos = getHandPositions().idle;
+        let dragX = bowPos.x - aimPosition.x;
+        let dragY = bowPos.y - aimPosition.y;
+        const powerFactor = 0.3;
+        const initState = {
+          x: bowPos.x,
+          y: bowPos.y,
+          vx: dragX * powerFactor,
+          vy: dragY * powerFactor
+        };
+        predictedTrajectory = computeTrajectory(initState);
+      }
+    });
+    canvas.addEventListener("mouseup", function(event) {
+      if(!isAiming) return;
+      isAiming = false;
+      const bowPos = getHandPositions().idle;
+      let dragX = bowPos.x - aimPosition.x;
+      let dragY = bowPos.y - aimPosition.y;
+      const powerFactor = 0.3;
+      arrow.x = bowPos.x;
+      arrow.y = bowPos.y;
+      arrow.vx = dragX * powerFactor;
+      arrow.vy = dragY * powerFactor;
+      arrow.angle = Math.atan2(arrow.vy, arrow.vx);
+      arrow.active = true;
+      arrow.initialState = {
+        x: bowPos.x,
+        y: bowPos.y,
+        vx: arrow.vx,
+        vy: arrow.vy
+      };
+      predictedTrajectory = [];
+      shooter.phase = "shooting";
+      shooter.animProgress = 0;
+      shooter.animStart = performance.now();
+    });
+
+    // === RESTART BUTTON EVENT LISTENER ===
+    document.getElementById("restartButton").addEventListener("click", resetGame);
+
+    // === INITIALIZE GAME ===
+    window.addEventListener("load", function() {
+      gameRunning = true;
+      initRound();
+      aimPosition = getHandPositions().idle;
+      lastTime = performance.now();
+      requestAnimationFrame(gameLoop);
+    });
+  </script>
+</body>
+</html>
+
